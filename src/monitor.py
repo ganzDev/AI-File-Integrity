@@ -3,6 +3,7 @@ import hashlib
 import os
 import stat
 from datetime import datetime
+from event_store import insert_event
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -25,6 +26,10 @@ def log_event(event_type, file_path, details=""):
     with open(LOG_FILE, "a") as log:
         log.write(log_entry + "\n")
 
+    try:
+        insert_event(timestamp, event_type, file_path, details)
+    except Exception as error:
+        print(f"WARNING: Failed to store event in SQLite: {error}")
 
 def calculate_sha256(file_path):
     sha256 = hashlib.sha256()
