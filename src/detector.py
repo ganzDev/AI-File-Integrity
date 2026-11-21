@@ -1,5 +1,5 @@
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from audit_parser import parse_audit_log
 from correlator import correlate_events, get_username
@@ -12,6 +12,7 @@ EVENT_RISK = {
     "DELETED": 30,
     "PERMISSION_CHANGED": 35,
     "ACCESS_DENIED": 25,
+    "UNAUTHORIZED_MODIFICATION": 35,
 }
 
 
@@ -77,6 +78,7 @@ def detect_suspicious_activity(limit=100):
             if finding["timestamp"]
             else []
         )
+
         audit_id = finding["audit_event_id"]
         file_path = finding["file_path"]
 
@@ -94,6 +96,7 @@ def detect_suspicious_activity(limit=100):
             continue
 
         existing = findings_by_key[key]
+
         existing["event_timestamps"].extend(
             finding["event_timestamps"]
         )
@@ -115,22 +118,29 @@ def detect_suspicious_activity(limit=100):
 
 
 def detect_denied_access():
-    """Find permission-denied operations in audit logs."""
+    """Find and classify permission-denied operations in audit logs."""
     findings = []
     seen = set()
 
     for event in parse_audit_log():
-        if event.get("key") != "org_file_reads":
+        if event.get("key") not in (
+            "org_file_reads",
+            "d3_denied_write",
+        ):
             continue
+
         if event.get("success") != "no":
             continue
+
         if event.get("exit_code") != -13:
             continue
 
         paths = [
-            path for path in event.get("paths", [])
+            path
+            for path in event.get("paths", [])
             if path.startswith("/opt/organization/")
         ]
+
         if not paths:
             continue
 
@@ -140,9 +150,23 @@ def detect_denied_access():
 
         if key in seen:
             continue
+
         seen.add(key)
 
-        score = EVENT_RISK["ACCESS_DENIED"]
+        # Distinguish unauthorized writes from denied reads.
+        access_mode = event.get("access_mode")
+
+        if access_mode in ("WRITE", "READ_WRITE"):
+            event_type = "UNAUTHORIZED_MODIFICATION"
+            reason = (
+                "Unauthorized file modification attempt "
+                "denied (EACCES)"
+            )
+        else:
+            event_type = "ACCESS_DENIED"
+            reason = "Operating system denied access (EACCES)"
+
+        score = EVENT_RISK[event_type]
 
         event_timestamp = event.get("timestamp")
         if event_timestamp is not None:
@@ -156,7 +180,7 @@ def detect_denied_access():
                 [event_timestamp] if event_timestamp else []
             ),
             "sqlite_ids": [],
-            "event_types": ["ACCESS_DENIED"],
+            "event_types": [event_type],
             "file_path": file_path,
             "username": get_username(event.get("euid")),
             "matched": True,
@@ -165,9 +189,7 @@ def detect_denied_access():
             "process": event.get("comm", "unknown"),
             "risk_score": score,
             "severity": get_severity(score),
-            "reasons": [
-                "Operating system denied access (EACCES)"
-            ],
+            "reasons": [reason],
         })
 
     return findings
@@ -190,22 +212,22 @@ def persist_findings(findings):
                 f"sqlite:{sqlite_ids[0]}:{finding['file_path']}"
             )
         else:
-            # Do not persist a finding without a stable source identifier.
+            # Do not persist findings without a stable source identifier.
             continue
-
 
         timestamps = finding.get("event_timestamps", [])
 
         if not timestamps:
             timestamps = [finding.get("timestamp")]
 
-        timestamps = [value for value in timestamps if value]
+        timestamps = [
+            value for value in timestamps if value
+        ]
 
         if not timestamps:
             continue
 
         timestamp = max(timestamps)
-
 
         finding_id = save_finding(
             finding_key=finding_key,
@@ -225,10 +247,30 @@ def persist_findings(findings):
 
 
 def print_findings(saved_findings):
-    """Print persisted findings using their permanent database IDs."""
+    """Print findings chronologically using permanent database IDs."""
+    saved_findings = sorted(
+        saved_findings,
+        key=lambda item: (
+            min(item[1].get("event_timestamps", []))
+            if item[1].get("event_timestamps")
+            else item[1].get("timestamp") or ""
+        ),
+    )
+
     for finding_id, finding in saved_findings:
         print("-" * 60)
         print(f"Finding ID:   {finding_id}")
+
+        timestamps = [
+            ts for ts in finding.get("event_timestamps", [])
+            if ts
+        ]
+
+        if timestamps:
+            print(f"First seen:   {min(timestamps)}")
+            print(f"Last seen:    {max(timestamps)}")
+        elif finding.get("timestamp"):
+            print(f"Timestamp:    {finding['timestamp']}")
 
         if finding["sqlite_ids"]:
             print(f"SQLite IDs:   {finding['sqlite_ids']}")
@@ -248,6 +290,7 @@ def print_findings(saved_findings):
 
         print(f"Process:      {finding['process']}")
         print("Reasons:")
+
         for reason in finding["reasons"]:
             print(f"  - {reason}")
 
