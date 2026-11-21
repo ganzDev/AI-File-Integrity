@@ -23,3 +23,11 @@ logs/*
 
 # OS
 .DS_Store
+
+# API keys and local environment configuration
+.env
+.env.*
+!.env.example
+
+# Local secrets
+passwords

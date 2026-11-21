@@ -15,6 +15,8 @@ EVENT_RISK = {
     "UNAUTHORIZED_MODIFICATION": 35,
 }
 
+WATCH_DIRECTORY = "/opt/organization/"
+
 
 def get_severity(score):
     """Convert a risk score into a provisional severity."""
@@ -25,6 +27,40 @@ def get_severity(score):
     if score >= 10:
         return "MEDIUM"
     return "LOW"
+
+
+def format_audit_timestamp(timestamp):
+    """Convert an audit timestamp to the monitor's timestamp format."""
+    if timestamp is None:
+        return None
+
+    return datetime.fromtimestamp(timestamp).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+
+
+def get_audit_file_path(event):
+    """Select a file path from an audit record."""
+    paths = [
+        path
+        for path in event.get("paths", [])
+        if path.startswith(WATCH_DIRECTORY)
+    ]
+
+    if not paths:
+        return None
+
+    # Prefer the target over a directory recorded as its parent.
+    non_parent_paths = [
+        path for path in paths
+        if not path.endswith("/")
+    ]
+
+    return (
+        non_parent_paths[-1]
+        if non_parent_paths
+        else paths[-1]
+    )
 
 
 def assess_event(event):
@@ -61,10 +97,56 @@ def assess_event(event):
         "audit_event_id": event.get("audit_event_id"),
         "pid": event.get("pid"),
         "process": event.get("process", "unknown"),
+        "permission_mode": None,
         "risk_score": score,
         "severity": get_severity(score),
         "reasons": reasons,
     }
+
+
+def merge_finding(existing, incoming):
+    """
+    Combine evidence associated with the same audit event and file.
+
+    Preserve distinct event types and SQLite IDs while using the
+    highest individual event risk score.
+    """
+    for timestamp in incoming.get("event_timestamps", []):
+        if timestamp and timestamp not in existing["event_timestamps"]:
+            existing["event_timestamps"].append(timestamp)
+
+    for sqlite_id in incoming.get("sqlite_ids", []):
+        if sqlite_id not in existing["sqlite_ids"]:
+            existing["sqlite_ids"].append(sqlite_id)
+
+    for event_type in incoming.get("event_types", []):
+        if event_type not in existing["event_types"]:
+            existing["event_types"].append(event_type)
+
+    for reason in incoming.get("reasons", []):
+        if reason not in existing["reasons"]:
+            existing["reasons"].append(reason)
+
+    if incoming["risk_score"] > existing["risk_score"]:
+        existing["risk_score"] = incoming["risk_score"]
+        existing["severity"] = incoming["severity"]
+
+    if incoming.get("permission_mode") is not None:
+        existing["permission_mode"] = incoming["permission_mode"]
+
+    if incoming.get("matched"):
+        existing["matched"] = True
+
+    if incoming.get("username") not in (None, "", "unknown"):
+        existing["username"] = incoming["username"]
+
+    if incoming.get("pid") is not None:
+        existing["pid"] = incoming["pid"]
+
+    if incoming.get("process") not in (None, "", "unknown"):
+        existing["process"] = incoming["process"]
+
+    return existing
 
 
 def detect_suspicious_activity(limit=100):
@@ -93,36 +175,21 @@ def detect_suspicious_activity(limit=100):
 
         if key not in findings_by_key:
             findings_by_key[key] = finding
-            continue
-
-        existing = findings_by_key[key]
-
-        existing["event_timestamps"].extend(
-            finding["event_timestamps"]
-        )
-        existing["sqlite_ids"].extend(finding["sqlite_ids"])
-
-        for event_type in finding["event_types"]:
-            if event_type not in existing["event_types"]:
-                existing["event_types"].append(event_type)
-
-        if finding["risk_score"] > existing["risk_score"]:
-            existing["risk_score"] = finding["risk_score"]
-            existing["severity"] = finding["severity"]
-
-        for reason in finding["reasons"]:
-            if reason not in existing["reasons"]:
-                existing["reasons"].append(reason)
+        else:
+            merge_finding(findings_by_key[key], finding)
 
     return list(findings_by_key.values())
 
 
-def detect_denied_access():
+def detect_denied_access(audit_events=None):
     """Find and classify permission-denied operations in audit logs."""
     findings = []
     seen = set()
 
-    for event in parse_audit_log():
+    if audit_events is None:
+        audit_events = parse_audit_log()
+
+    for event in audit_events:
         if event.get("key") not in (
             "org_file_reads",
             "d3_denied_write",
@@ -135,16 +202,11 @@ def detect_denied_access():
         if event.get("exit_code") != -13:
             continue
 
-        paths = [
-            path
-            for path in event.get("paths", [])
-            if path.startswith("/opt/organization/")
-        ]
+        file_path = get_audit_file_path(event)
 
-        if not paths:
+        if file_path is None:
             continue
 
-        file_path = paths[-1]
         audit_id = event.get("event_id")
         key = (str(audit_id), file_path)
 
@@ -168,11 +230,9 @@ def detect_denied_access():
 
         score = EVENT_RISK[event_type]
 
-        event_timestamp = event.get("timestamp")
-        if event_timestamp is not None:
-            event_timestamp = datetime.fromtimestamp(
-                event_timestamp
-            ).strftime("%Y-%m-%d %H:%M:%S")
+        event_timestamp = format_audit_timestamp(
+            event.get("timestamp")
+        )
 
         findings.append({
             "timestamp": event_timestamp,
@@ -187,12 +247,124 @@ def detect_denied_access():
             "audit_event_id": audit_id,
             "pid": event.get("pid"),
             "process": event.get("comm", "unknown"),
+            "permission_mode": None,
             "risk_score": score,
             "severity": get_severity(score),
             "reasons": [reason],
         })
 
     return findings
+
+
+def detect_permission_changes(audit_events=None):
+    """
+    Detect successful permission changes directly from auditd.
+
+    This catches chmod-family operations even if Watchdog misses
+    the change because it occurred too quickly.
+    """
+    findings = []
+    seen = set()
+
+    if audit_events is None:
+        audit_events = parse_audit_log()
+
+    for event in audit_events:
+        if event.get("key") != "org_file_changes":
+            continue
+
+        if event.get("operation") != "PERMISSION_CHANGED":
+            continue
+
+        if event.get("success") != "yes":
+            continue
+
+        file_path = get_audit_file_path(event)
+
+        if file_path is None:
+            continue
+
+        audit_id = event.get("event_id")
+
+        if audit_id is None:
+            continue
+
+        key = (str(audit_id), file_path)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        permission_mode = event.get("permission_mode")
+        score = EVENT_RISK["PERMISSION_CHANGED"]
+
+        event_timestamp = format_audit_timestamp(
+            event.get("timestamp")
+        )
+
+        if permission_mode is not None:
+            reason = (
+                "Successful permission-changing system call: "
+                f"requested mode {permission_mode}"
+            )
+        else:
+            reason = (
+                "Successful permission-changing system call; "
+                "requested mode unavailable"
+            )
+
+        findings.append({
+            "timestamp": event_timestamp,
+            "event_timestamps": (
+                [event_timestamp] if event_timestamp else []
+            ),
+            "sqlite_ids": [],
+            "event_types": ["PERMISSION_CHANGED"],
+            "file_path": file_path,
+            "username": get_username(event.get("euid")),
+            "matched": True,
+            "audit_event_id": audit_id,
+            "pid": event.get("pid"),
+            "process": event.get("comm") or "unknown",
+            "permission_mode": permission_mode,
+            "risk_score": score,
+            "severity": get_severity(score),
+            "reasons": [reason],
+        })
+
+    return findings
+
+
+def combine_findings(findings):
+    """
+    Merge findings referring to the same audit event and file.
+
+    Findings without an audit ID remain separate because their
+    identity is based on their SQLite source event.
+    """
+    combined = {}
+
+    for finding in findings:
+        audit_id = finding.get("audit_event_id")
+        file_path = finding.get("file_path")
+
+        if audit_id is not None:
+            key = ("audit", str(audit_id), file_path)
+        else:
+            sqlite_ids = finding.get("sqlite_ids", [])
+
+            if not sqlite_ids:
+                continue
+
+            key = ("sqlite", str(sqlite_ids[0]), file_path)
+
+        if key not in combined:
+            combined[key] = finding
+        else:
+            merge_finding(combined[key], finding)
+
+    return list(combined.values())
 
 
 def persist_findings(findings):
@@ -289,17 +461,37 @@ def print_findings(saved_findings):
             print(f"PID:          {finding['pid']}")
 
         print(f"Process:      {finding['process']}")
+
+        if finding.get("permission_mode") is not None:
+            print(
+                f"Requested permissions: "
+                f"{finding['permission_mode']}"
+            )
+
         print("Reasons:")
 
         for reason in finding["reasons"]:
             print(f"  - {reason}")
 
 
-if __name__ == "__main__":
+def main():
+    """Run all detection sources and persist findings."""
     findings = detect_suspicious_activity()
-    findings.extend(detect_denied_access())
+
+    # Parse the audit log once for both audit-based detectors.
+    audit_events = parse_audit_log()
+
+    findings.extend(detect_denied_access(audit_events))
+    findings.extend(detect_permission_changes(audit_events))
+
+    # Merge findings that refer to the exact same audit operation.
+    findings = combine_findings(findings)
 
     saved = persist_findings(findings)
     print_findings(saved)
 
     print("\nPersisted finding count:", len(get_findings()))
+
+
+if __name__ == "__main__":
+    main()

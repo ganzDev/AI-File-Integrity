@@ -129,29 +129,24 @@ print("Deleted 5 test files")
 
 
 def permission_change(run_dir):
-    """Change the permissions of a disposable file."""
+    """Simulate an immediate permission change."""
     code = """
 import sys
-import time
 from pathlib import Path
 
 file = Path(sys.argv[1]) / "permission_test.txt"
 
-# Create the file with its original permissions.
 file.write_text("Disposable permission test\\n")
 file.chmod(0o644)
 
-# Allow watchdog to register the original permissions.
-time.sleep(3)
-
-# Perform the suspicious permission change.
+# Change permissions immediately without waiting.
 file.chmod(0o666)
 
-# Allow the monitor's permission polling to detect the change.
-time.sleep(3)
-
-print("Changed test file permissions from 644 to 666")
+print("Changed file permissions immediately from 644 to 666")
 """
+
+    result = run_python(code, run_dir)
+    return check_result(result), result
 
     result = run_python(code, run_dir)
     return check_result(result), result
