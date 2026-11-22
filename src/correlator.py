@@ -1,4 +1,3 @@
-
 import os
 from datetime import datetime
 import pwd
@@ -107,7 +106,7 @@ def candidate_priority(event_type, audit_event):
     return 0
 
 
-def correlate_events(limit=100):
+def correlate_events(limit=100, sqlite_events=None, audit_events=None):
     """
     Match SQLite filesystem events with compatible audit records.
 
@@ -117,8 +116,10 @@ def correlate_events(limit=100):
       3. A timestamp within the configured window.
       4. A successful audit syscall.
     """
-    sqlite_events = get_recent_events(limit)
-    audit_events = parse_audit_log()
+    if sqlite_events is None:
+        sqlite_events = get_recent_events(limit)
+    if audit_events is None:
+        audit_events = parse_audit_log()
 
     # Only use successful audit records for file changes.
     change_events = [
@@ -128,6 +129,13 @@ def correlate_events(limit=100):
         and event.get("success") == "yes"
         and get_audit_operation(event) is not None
     ]
+
+    # Index by path so processing a batch does not scan every audit
+    # operation for each Watchdog notification.
+    audit_by_path = {}
+    for audit_event in change_events:
+        for path in set(audit_event.get("paths", [])):
+            audit_by_path.setdefault(path, []).append(audit_event)
 
     results = []
 
@@ -146,10 +154,7 @@ def correlate_events(limit=100):
 
         candidates = []
 
-        for audit_event in change_events:
-            # Require an exact file path.
-            if file_path not in audit_event.get("paths", []):
-                continue
+        for audit_event in audit_by_path.get(file_path, []):
 
             # Reject unrelated operations.
             if not operations_match(event_type, audit_event):
@@ -198,6 +203,7 @@ def correlate_events(limit=100):
             "matched": True,
             "time_difference_seconds": round(difference, 3),
             "audit_event_id": audit_event["event_id"],
+            "audit_timestamp": audit_event["timestamp"],
             "audit_operation": get_audit_operation(audit_event),
             "username": get_username(audit_event.get("euid")),
             "uid": audit_event.get("euid"),
@@ -209,6 +215,184 @@ def correlate_events(limit=100):
         })
 
     return results
+
+
+def group_related_audit_events(
+    reference_event_id,
+    reference_timestamp,
+    window_seconds=5,
+    min_events=2,
+):
+    """
+    Find audit events belonging to the same behavioral incident.
+
+    Events must share:
+    - Effective user (EUID)
+    - Historical process ID (PID)
+    - Parent directory
+    - Operation type
+    - A bounded time window
+
+    Uses auditd evidence, not Watchdog notification counts.
+    """
+    from datetime import datetime
+    from pathlib import Path
+
+    from audit_parser import parse_audit_log
+
+    if isinstance(reference_timestamp, str):
+        reference_time = datetime.strptime(
+            reference_timestamp[:19],
+            "%Y-%m-%d %H:%M:%S",
+        ).timestamp()
+    else:
+        reference_time = float(reference_timestamp)
+
+    window_seconds = max(1, min(int(window_seconds), 300))
+    min_events = max(2, int(min_events))
+
+    audit_events = parse_audit_log()
+
+    # Audit IDs can repeat across boots. Match both ID and time.
+    candidates = [
+        event
+        for event in audit_events
+        if str(event.get("event_id")) == str(reference_event_id)
+        and event.get("syscall") is not None
+        and event.get("timestamp") is not None
+        and abs(event["timestamp"] - reference_time) <= 10
+    ]
+
+    if len(candidates) != 1:
+        return {
+            "status": "REFERENCE_NOT_UNIQUE",
+            "matching_records": len(candidates),
+            "events": [],
+        }
+
+    reference = candidates[0]
+
+    reference_paths = [
+        path
+        for path in reference.get("paths", [])
+        if path.startswith("/opt/organization/")
+    ]
+
+    if not reference_paths:
+        return {
+            "status": "NO_MONITORED_PATH",
+            "events": [],
+        }
+
+    reference_path = reference_paths[-1]
+    directory = str(Path(reference_path).parent)
+
+    operation = get_audit_operation(reference)
+
+    if operation is None:
+        return {
+            "status": "UNSUPPORTED_OPERATION",
+            "events": [],
+        }
+
+    related = []
+    seen = set()
+
+    for event in audit_events:
+        if event.get("syscall") is None:
+            continue
+
+        if event.get("success") != "yes":
+            continue
+
+        if get_audit_operation(event) != operation:
+            continue
+
+        if event.get("euid") != reference.get("euid"):
+            continue
+
+        if event.get("pid") != reference.get("pid"):
+            continue
+
+        timestamp = event.get("timestamp")
+
+        if timestamp is None:
+            continue
+
+        if abs(timestamp - reference["timestamp"]) > window_seconds:
+            continue
+
+        for path in event.get("paths", []):
+            if not path.startswith("/opt/organization/"):
+                continue
+
+            if str(Path(path).parent) != directory:
+                continue
+
+            identity = (
+                event.get("event_id"),
+                timestamp,
+                path,
+            )
+
+            if identity in seen:
+                continue
+
+            seen.add(identity)
+
+            related.append({
+                "audit_event_id": str(event["event_id"]),
+                "timestamp": timestamp,
+                "operation": get_audit_operation(event),
+                "file_path": path,
+                "pid": event["pid"],
+                "euid": event["euid"],
+                "process": event.get("comm"),
+            })
+
+    related.sort(
+        key=lambda event: (
+            event["timestamp"],
+            int(event["audit_event_id"]),
+        )
+    )
+
+    unique_files = {
+        event["file_path"] for event in related
+    }
+
+    timestamps = [
+        event["timestamp"] for event in related
+    ]
+
+    duration = (
+        max(timestamps) - min(timestamps)
+        if timestamps else 0.0
+    )
+
+    # Describe behavior without assuming O_CREAT caused creation.
+    behavior = operation
+
+    if operation == "CREATED":
+        behavior = "REPEATED_WRITE_OPENS"
+
+    return {
+        "status": (
+            "GROUP_DETECTED"
+            if len(related) >= min_events
+            else "SINGLE_EVENT"
+        ),
+        "operation": operation,
+        "directory": directory,
+        "pid": reference.get("pid"),
+        "euid": reference.get("euid"),
+        "process": reference.get("comm"),
+        "event_count": len(related),
+        "unique_file_count": len(unique_files),
+        "duration_seconds": round(duration, 4),
+        "events": related,
+        "behavior": behavior,
+    }
 
 
 if __name__ == "__main__":

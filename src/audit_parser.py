@@ -1,4 +1,3 @@
-
 import os
 import re
 from pathlib import Path
@@ -84,12 +83,32 @@ def get_operation(syscall):
     return None
 
 
-def parse_audit_log(log_path=AUDIT_LOG):
-    """Extract file-operation records from the Linux audit log."""
+
+def parse_audit_log(log_path=AUDIT_LOG, start_offset=0):
+    """Parse audit records, optionally starting at a byte offset.
+
+    Callers reading a growing log should overlap prior bytes to avoid
+    losing multi-line events split between polling cycles.
+
+    Relative PATH names are resolved using the audit event's CWD.
+    """
+    import posixpath
+
     events = {}
 
-    with open(log_path, "r", encoding="utf-8", errors="replace") as log:
-        for line in log:
+    with open(log_path, "rb") as log:
+        if start_offset > 0:
+            log.seek(max(0, start_offset - 1))
+            previous = log.read(1)
+
+            if previous != b"\n":
+                log.readline()
+            else:
+                log.seek(start_offset)
+
+        for raw_line in log:
+            line = raw_line.decode("utf-8", errors="replace")
+
             match = re.search(
                 r"type=(\w+)\s+msg=audit\(([\d.]+):(\d+)\):\s*(.*)",
                 line,
@@ -101,6 +120,15 @@ def parse_audit_log(log_path=AUDIT_LOG):
             record_type, timestamp, event_id, payload = match.groups()
             key = (timestamp, event_id)
 
+            # Preserve records regardless of their arrival order.
+            if key not in events:
+                events[key] = {
+                    "timestamp": float(timestamp),
+                    "event_id": event_id,
+                    "paths": [],
+                    "cwd": None,
+                }
+
             if record_type == "SYSCALL":
                 syscall_match = re.search(
                     r"\bsyscall=(\d+)", payload
@@ -111,7 +139,6 @@ def parse_audit_log(log_path=AUDIT_LOG):
                     if syscall_match else None
                 )
 
-                # Extract syscall arguments from raw audit records.
                 arguments = {}
 
                 for argument_name in ("a0", "a1", "a2", "a3"):
@@ -125,7 +152,6 @@ def parse_audit_log(log_path=AUDIT_LOG):
                         if argument_match else None
                     )
 
-                # Preserve existing open/openat flag extraction.
                 flags_argument = (
                     arguments["a1"] if syscall_number == 2
                     else arguments["a2"] if syscall_number == 257
@@ -138,7 +164,6 @@ def parse_audit_log(log_path=AUDIT_LOG):
                     else None
                 )
 
-                # Extract permission changes from chmod-family calls.
                 permission_mode = get_permission_mode(
                     syscall_number,
                     arguments,
@@ -169,11 +194,9 @@ def parse_audit_log(log_path=AUDIT_LOG):
                     r'\bkey="?([^"\s]+)"?', payload
                 )
 
-                # Preserve PATH records encountered before SYSCALL.
-                existing_event = events.get(key, {})
-                existing_paths = existing_event.get("paths", [])
-
-                events[key] = {
+                # Update the event without discarding PATH/CWD
+                # records that may have arrived earlier.
+                events[key].update({
                     "timestamp": float(timestamp),
                     "event_id": event_id,
                     "pid": (
@@ -224,25 +247,61 @@ def parse_audit_log(log_path=AUDIT_LOG):
                         key_match.group(1)
                         if key_match else None
                     ),
-                    "paths": existing_paths,
-                }
+                })
+
+            elif record_type == "CWD":
+                cwd_match = re.search(
+                    r'\bcwd=(?:"([^"]*)"|(\S+))',
+                    payload,
+                )
+
+                if cwd_match:
+                    events[key]["cwd"] = (
+                        cwd_match.group(1)
+                        if cwd_match.group(1) is not None
+                        else cwd_match.group(2)
+                    )
 
             elif record_type == "PATH":
                 path_match = re.search(
-                    r'\bname="?([^"\s]+)"?', payload
+                    r'\bname=(?:"([^"]*)"|(\S+))',
+                    payload,
                 )
 
                 if path_match:
-                    if key not in events:
-                        events[key] = {
-                            "timestamp": float(timestamp),
-                            "event_id": event_id,
-                            "paths": [],
-                        }
-
-                    events[key]["paths"].append(
+                    path = (
                         path_match.group(1)
+                        if path_match.group(1) is not None
+                        else path_match.group(2)
                     )
+
+                    events[key]["paths"].append(path)
+
+    # Resolve relative PATH names after collecting the event.
+    # This works regardless of whether CWD or PATH arrived first.
+    for event in events.values():
+        cwd = event.get("cwd")
+        resolved_paths = []
+
+        for path in event.get("paths", []):
+            if posixpath.isabs(path):
+                resolved_paths.append(
+                    posixpath.normpath(path)
+                )
+
+            elif cwd and posixpath.isabs(cwd):
+                resolved_paths.append(
+                    posixpath.normpath(
+                        posixpath.join(cwd, path)
+                    )
+                )
+
+            else:
+                # Preserve unresolved paths rather than inventing
+                # an absolute location.
+                resolved_paths.append(path)
+
+        event["paths"] = resolved_paths
 
     return list(events.values())
 

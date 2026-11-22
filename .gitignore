@@ -31,3 +31,20 @@ logs/*
 
 # Local secrets
 passwords
+
+# Git recovery and local backups
+.git-corrupted-backup/
+backups/
+
+# Temporary archives
+*.zip
+*.py.bak
+*.py.bak2
+
+# SQLite temporary files
+*.db-wal
+*.db-shm
+
+# Local test artifacts
+.pytest_cache/
+.coverage

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a111f">
+  <title>AI-File-Integrity · Security Operations</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script>window.AFI_CSRF = {{ csrf|tojson }};</script>
+  <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-icon">⌁</div><div><strong>FILE<span>INTEGRITY</span></strong><small>SECURITY OPERATIONS</small></div></div>
+      <div class="sidebar-label">WORKSPACE</div>
+      <nav class="navigation" aria-label="Sections">
+        <button class="navitem active" data-view="overview"><span>◈</span> Overview</button>
+        <button class="navitem" data-view="findings"><span>▦</span> Security Findings</button>
+        <button class="navitem" data-view="investigations"><span>◎</span> AI Investigations</button>
+        <button class="navitem" data-view="evaluation"><span>▥</span> Model Evaluation</button>
+        <button class="navitem" data-view="events"><span>≋</span> Event Stream</button>
+        <button class="navitem" data-view="logs"><span>⌘</span> System Logs</button>
+      </nav>
+      <div class="sidebar-bottom"><div class="side-status"><span id="sidePulse" class="pulse"></span><span id="sideText">Checking services</span></div><div class="tiny-note">Local research deployment<br>Monitoring · Analysis · Evidence</div></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><div class="crumbs">AI-File-Integrity <span>/</span> <strong id="breadcrumb">Overview</strong></div><div class="top-actions"><div class="live-label"><span class="pulse"></span> LIVE DATABASE</div><button id="refreshBtn" class="btn btn-quiet" type="button">↻ Refresh</button><span class="utc-clock" id="lastUpdated">—</span></div></header>
+      <div class="page">
+        <div class="flash" id="flash" role="status" aria-live="polite" hidden></div>
+        <section class="view" id="view-overview">
+          <div class="page-head"><div><div class="eyebrow">SECURITY OPERATIONS CENTER</div><h1>Overview</h1><p>Real-time visibility across file integrity events and AI-assisted investigations.</p></div><div class="head-tag">LOCAL HOST · READ-ONLY EVIDENCE</div></div>
+          <div class="stat-grid">
+            <div class="stat-card"><div class="stat-label">Total events <span>⌁</span></div><div class="stat-value" id="metricEvents">—</div><div class="stat-desc">Recorded filesystem activity</div></div>
+            <div class="stat-card"><div class="stat-label">Security findings <span>◇</span></div><div class="stat-value" id="metricFindings">—</div><div class="stat-desc">Rule-based detections</div></div>
+            <div class="stat-card"><div class="stat-label">Open findings <span>◉</span></div><div class="stat-value" id="metricOpen">—</div><div class="stat-desc">Awaiting resolution</div></div>
+            <div class="stat-card accent"><div class="stat-label">AI assessments <span>✧</span></div><div class="stat-value" id="metricAI">—</div><div class="stat-desc">Saved investigations</div></div>
+          </div>
+          <div class="two-panel">
+            <div class="panel"><div class="panel-head"><div><h2>Service control</h2><p>Managed by systemd. Services continue after closing this page.</p></div><button class="btn btn-quiet" id="serviceRefresh">↻</button></div>
+              <div class="service-line"><div><strong>Filesystem monitor</strong><small>Watchdog · recursive observation</small></div><span class="service-state" id="monitorState">—</span><div class="service-buttons"><button class="btn btn-start" data-service="monitor" data-action="start">Start</button><button class="btn btn-quiet" data-service="monitor" data-action="stop">Stop</button><button class="btn btn-quiet" data-service="monitor" data-action="restart">↻</button></div></div>
+              <div class="service-line"><div><strong>Rule-based detector</strong><small>Continuous · 5-second polling</small></div><span class="service-state" id="detectorState">—</span><div class="service-buttons"><button class="btn btn-start" data-service="detector" data-action="start">Start</button><button class="btn btn-quiet" data-service="detector" data-action="stop">Stop</button><button class="btn btn-quiet" data-service="detector" data-action="restart">↻</button></div></div>
+              <div class="service-line"><div><strong>Linux auditd</strong><small>Kernel-level audit evidence · informational</small></div><span class="service-state" id="auditdState">—</span><span class="read-only-label">SYSTEM MANAGED</span></div>
+              <div class="helper-note">Before using Start/Stop, install the provided service units and stop any manually launched monitor or detector processes.</div>
+            </div>
+            <div class="panel"><div class="panel-head"><div><h2>Finding severity</h2><p>All-time distribution</p></div></div><div id="severityBars" class="bar-stack"></div><div class="mini-divider"></div><div class="panel-head"><div><h2>AI decisions</h2><p>All saved assessments</p></div></div><div id="aiBars" class="bar-stack"></div></div>
+          </div>
+          <div class="panel"><div class="panel-head"><div><h2>Latest security findings</h2><p>Continuously refreshed from SQLite</p></div><button class="btn btn-quiet" data-go="findings">Explore all →</button></div><div class="table-scroller"><table><thead><tr><th>ID</th><th>Event</th><th>File / path</th><th>User</th><th>Severity</th><th>AI</th><th></th></tr></thead><tbody id="overviewFindings"><tr><td colspan="7" class="empty">Loading findings…</td></tr></tbody></table></div></div>
+        </section>
+        <section class="view" id="view-findings" hidden>
+          <div class="page-head"><div><div class="eyebrow">DETECTION RECORDS</div><h1>Security findings</h1><p>Search and inspect rule-based findings, evidence, and AI assessments.</p></div><span id="findingCount" class="head-tag">—</span></div>
+          <div class="panel"><div class="filterbar"><input type="search" id="findSearch" placeholder="Search ID, file path, user, event…" aria-label="Search findings"><select id="findSeverity"><option value="">All severity</option><option>CRITICAL</option><option>HIGH</option><option>MEDIUM</option><option>LOW</option></select><select id="findStatus"><option value="">All status</option><option>OPEN</option><option>INVESTIGATING</option><option>RESOLVED</option></select><select id="findClass"><option value="">All AI decisions</option><option>BENIGN</option><option>SUSPICIOUS</option><option>INCONCLUSIVE</option></select></div><div class="table-scroller"><table><thead><tr><th>ID</th><th>Event</th><th>File / path</th><th>User</th><th>Severity</th><th>Status</th><th>AI</th></tr></thead><tbody id="findingsBody"></tbody></table></div><div class="pagination"><button class="btn btn-quiet" id="prevPage">← Previous</button><span id="pageInfo">—</span><button class="btn btn-quiet" id="nextPage">Next →</button></div></div>
+        </section>
+        <section class="view" id="view-investigations" hidden><div class="page-head"><div><div class="eyebrow">AI EVIDENCE ANALYSIS</div><h1>AI investigations</h1><p>Saved classifications, confidence, reasoning, and independent claim verification.</p></div></div><div class="panel"><div class="table-scroller"><table><thead><tr><th>Assessment</th><th>Finding</th><th>Classification</th><th>Severity</th><th>Confidence</th><th>Validation</th><th>Time</th></tr></thead><tbody id="assessmentsBody"></tbody></table></div></div></section>
+        <section class="view" id="view-evaluation" hidden><div class="page-head"><div><div class="eyebrow">EXPERIMENTAL DATA</div><h1>Model evaluation</h1><p>Original frozen-model scenarios, benign controls, and deletion comparisons.</p></div><div class="head-tag">15 CASE HISTORICAL COHORT</div></div><div class="panel"><div class="panel-head"><div><h2>Classification by experimental case</h2><p>Repeated investigations per selected finding. Agreement is not accuracy.</p></div></div><div class="legend"><span><i class="dot suspicious"></i>Suspicious</span><span><i class="dot benign"></i>Benign</span><span><i class="dot inconclusive"></i>Inconclusive</span></div><div id="evalRows" class="eval-rows"></div></div><div class="panel info-panel"><strong>Interpretation</strong><p>These cases were selected for a controlled capstone study. Repeated assessments of a single finding are correlated observations, not independent real-world incidents. Test labels describe researcher intent; the AI did not receive verified authorization records. Changing filenames, directories, or process tools can introduce confounding factors.</p></div></section>
+        <section class="view" id="view-events" hidden><div class="page-head"><div><div class="eyebrow">FILESYSTEM TELEMETRY</div><h1>Event stream</h1><p>Recent raw Watchdog events from the existing database.</p></div></div><div class="panel"><div class="table-scroller"><table><thead><tr><th>ID</th><th>Timestamp</th><th>Operation</th><th>File / path</th><th>Details</th></tr></thead><tbody id="eventsBody"></tbody></table></div></div></section>
+        <section class="view" id="view-logs" hidden><div class="page-head"><div><div class="eyebrow">SERVICE DIAGNOSTICS</div><h1>System logs</h1><p>Recent journal entries for managed backend services.</p></div></div><div class="panel"><div class="filterbar"><select id="logService"><option value="monitor">Filesystem monitor</option><option value="detector">Rule-based detector</option><option value="auditd">auditd</option></select><button class="btn btn-primary" id="loadLogs">Load latest logs</button></div><pre id="logOutput" class="terminal">Select a service and load its journal.</pre></div></section>
+      </div>
+    </main>
+  </div>
+  <div id="overlay" class="overlay" hidden><div class="drawer" role="dialog" aria-modal="true" aria-label="Details"><div class="drawer-header"><div><div class="eyebrow" id="drawerEyebrow">DETAIL</div><h2 id="drawerTitle">Finding</h2></div><button id="drawerClose" class="close-button" aria-label="Close details">×</button></div><div id="drawerContent" class="drawer-content"></div></div></div>
+  <div id="confirmOverlay" class="overlay modal-overlay" hidden><div class="modal" role="dialog" aria-modal="true"><div class="eyebrow">CONFIRM ACTION</div><h2 id="confirmTitle">Confirm</h2><p id="confirmDescription"></p><div class="modal-actions"><button class="btn btn-quiet" id="cancelAction">Cancel</button><button class="btn btn-primary" id="confirmAction">Confirm</button></div></div></div>
+</body>
+</html>

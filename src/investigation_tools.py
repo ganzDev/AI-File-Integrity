@@ -231,6 +231,22 @@ def get_live_process(pid):
         }
 
 
+
+def get_incident_context(
+    audit_event_id,
+    timestamp,
+    window_seconds=5,
+):
+    """Retrieve related audit activity as a behavioral incident."""
+    from correlator import group_related_audit_events
+
+    return group_related_audit_events(
+        reference_event_id=audit_event_id,
+        reference_timestamp=timestamp,
+        window_seconds=window_seconds,
+    )
+
+
 if __name__ == "__main__":
     finding = get_finding(1702)
 

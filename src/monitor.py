@@ -23,7 +23,8 @@ def log_event(event_type, file_path, details=""):
 
     print(log_entry)
 
-    with open(LOG_FILE, "a") as log:
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as log:
         log.write(log_entry + "\n")
 
     try:
@@ -65,12 +66,16 @@ class FileMonitorHandler(FileSystemEventHandler):
             file_hash = calculate_sha256(event.src_path)
             permissions = get_permissions(event.src_path)
 
-            self.file_permissions[event.src_path] = permissions
+            if permissions is not None:
+                self.file_permissions[event.src_path] = permissions
 
+            permission_text = (
+                oct(permissions) if permissions is not None else "UNAVAILABLE"
+            )
             log_event(
                 "CREATED",
                 event.src_path,
-                f"SHA256={file_hash} | PERMISSIONS={oct(permissions)}"
+                f"SHA256={file_hash} | PERMISSIONS={permission_text}"
             )
 
     def on_modified(self, event):
@@ -135,9 +140,10 @@ def main():
             time.sleep(1)
 
     except KeyboardInterrupt:
+        print("Stopping filesystem monitor...")
+    finally:
         observer.stop()
-
-    observer.join()
+        observer.join()
 
 
 if __name__ == "__main__":

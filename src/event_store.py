@@ -1,4 +1,3 @@
-
 import sqlite3
 from pathlib import Path
 
@@ -18,6 +17,13 @@ def initialize_database():
                 event_type TEXT NOT NULL,
                 file_path TEXT NOT NULL,
                 details TEXT
+            )
+        """)
+
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS detector_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )
         """)
 
@@ -134,3 +140,76 @@ def get_findings(limit=100):
         """, (limit,)).fetchall()
 
         return [dict(row) for row in rows]
+
+
+def get_events_after(last_id, limit=500):
+    """Fetch a bounded, ascending batch; no event can be skipped by LIMIT."""
+    initialize_database()
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        return connection.execute("""
+            SELECT id, timestamp, event_type, file_path, details
+            FROM events WHERE id > ? ORDER BY id ASC LIMIT ?
+        """, (last_id, limit)).fetchall()
+
+
+def get_latest_event_id():
+    initialize_database()
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        return connection.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM events"
+        ).fetchone()[0]
+
+
+def get_detector_state():
+    initialize_database()
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        return dict(connection.execute(
+            "SELECT key, value FROM detector_state"
+        ).fetchall())
+
+
+def save_detector_state(values):
+    """Checkpoint only after all findings for the cycle are saved."""
+    initialize_database()
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        connection.executemany("""
+            INSERT INTO detector_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+        """, [(key, str(value)) for key, value in values.items()])
+
+
+def resolve_finding_key(audit_id, audit_timestamp, file_path, sqlite_ids):
+    """Use precise audit identity while reusing matching legacy records.
+
+    An existing legacy finding is reused only if its first_seen falls
+    within the original audit/Watchdog correlation tolerance.
+    """
+    if audit_id is None:
+        return (f"sqlite:{sqlite_ids[0]}:{file_path}"
+                if sqlite_ids else None)
+
+    if audit_timestamp is None:
+        # No true audit identity: do not invent a timestamp from Watchdog.
+        return (f"sqlite:{sqlite_ids[0]}:{file_path}"
+                if sqlite_ids else None)
+
+    from datetime import datetime
+
+    legacy_key = f"audit:{audit_id}:{file_path}"
+    with sqlite3.connect(DATABASE_PATH) as connection:
+        row = connection.execute(
+            "SELECT first_seen FROM findings WHERE finding_key = ?",
+            (legacy_key,),
+        ).fetchone()
+
+    if row:
+        try:
+            original_time = datetime.strptime(
+                row[0][:19], "%Y-%m-%d %H:%M:%S"
+            ).timestamp()
+            if abs(original_time - float(audit_timestamp)) <= 5.0:
+                return legacy_key
+        except (ValueError, TypeError, OverflowError):
+            pass
+
+    return f"audit2:{audit_id}:{float(audit_timestamp):.6f}:{file_path}"

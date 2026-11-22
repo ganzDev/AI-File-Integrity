@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""Root-owned narrow command dispatcher for the localhost AFI dashboard.
+
+Install as /usr/local/sbin/afi-admin, root:root, mode 0755.
+Never allow untrusted users to edit this helper or its config.
+"""
+import os
+import json
+from datetime import datetime
+import re
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+
+CONF = Path('/etc/ai-file-integrity/project-path')
+UNITS = {
+    'monitor': 'ai-file-integrity-monitor.service',
+    'detector': 'ai-file-integrity-detector.service',
+    'auditd': 'auditd.service',
+}
+ACTIONS = {'start', 'stop', 'restart'}
+STATUSES = {'OPEN', 'INVESTIGATING', 'RESOLVED'}
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    sys.exit(2)
+
+
+def file_env(path):
+    """Read simple .env KEY=VALUE entries without invoking a shell."""
+    result = {}
+    if not path.is_file():
+        return result
+    for line in path.read_text(encoding='utf-8').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        if line.startswith('export '):
+            line = line[7:].strip()
+        key, value = line.split('=', 1)
+        key, value = key.strip(), value.strip()
+        if key not in {'OPENAI_API_KEY', 'OPENAI_MODEL'}:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        result[key] = value
+    return result
+
+
+def run(args, *, cwd=None, env=None, timeout=30):
+    try:
+        proc = subprocess.run(args, cwd=cwd, env=env, timeout=timeout, text=True)
+        sys.exit(proc.returncode)
+    except subprocess.TimeoutExpired:
+        fail('Command timed out')
+
+
+def main():
+    if not CONF.is_file():
+        fail('Dashboard not configured; run deployment/install.sh')
+    root = Path(CONF.read_text(encoding='utf-8').strip()).resolve()
+    if not (root / 'src' / 'ai_investigator.py').is_file():
+        fail('Project directory does not contain the AI investigator')
+    if len(sys.argv) < 2:
+        fail('Expected service, logs, status, or investigate')
+    cmd = sys.argv[1]
+    if cmd == 'service' and len(sys.argv) == 4:
+        service, action = sys.argv[2:]
+        if service not in {'monitor','detector'} or action not in ACTIONS:
+            fail('Invalid service or action')
+        run(['/usr/bin/systemctl', action, UNITS[service]], timeout=25)
+    elif cmd == 'logs' and len(sys.argv) == 3:
+        service = sys.argv[2]
+        if service not in UNITS:
+            fail('Unknown service')
+        run(['/usr/bin/journalctl', '--no-pager', '-n', '90',
+             '--output=short-iso', '-u', UNITS[service]], timeout=10)
+    elif cmd == 'audit' and len(sys.argv) == 4:
+        audit_id, observed_time = sys.argv[2:]
+        if not audit_id.isascii() or not audit_id.isdecimal() or len(audit_id)>12:
+            fail('Invalid audit ID')
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', observed_time):
+            fail('Invalid reference timestamp')
+        # Audit records are kernel logs, read by the privileged helper.
+        sys.path.insert(0, str(root / 'src'))
+        os.chdir(root)
+        from audit_parser import parse_audit_log
+        reference = datetime.strptime(observed_time, '%Y-%m-%d %H:%M:%S').timestamp()
+        matches = [e for e in parse_audit_log()
+                   if str(e.get('event_id')) == audit_id
+                   and e.get('syscall') is not None
+                   and abs(e.get('timestamp', 0) - reference) <= 10]
+        print(json.dumps({'matches': matches[:10], 'total_matches':len(matches)}))
+    elif cmd == 'status' and len(sys.argv) == 4:
+        identifier, status = sys.argv[2:]
+        if not identifier.isascii() or not identifier.isdecimal() or len(identifier)>12 or status not in STATUSES:
+            fail('Invalid finding ID or status')
+        with sqlite3.connect(root / 'logs' / 'security_events.db', timeout=5) as db:
+            result = db.execute('UPDATE findings SET status=? WHERE id=?',
+                                (status, int(identifier)))
+        if result.rowcount != 1:
+            fail('Finding not found')
+        print(f'Finding {identifier} status set to {status}')
+    elif cmd == 'investigate' and len(sys.argv) == 3:
+        identifier = sys.argv[2]
+        if not identifier.isascii() or not identifier.isdecimal() or len(identifier)>12 or int(identifier)<1:
+            fail('Invalid finding ID')
+        env = os.environ.copy()
+        env.update(file_env(root / '.env'))
+        if not env.get('OPENAI_API_KEY'):
+            fail('OPENAI_API_KEY unavailable; check project .env')
+        run([str(root / '.venv' / 'bin' / 'python'),
+             str(root / 'src' / 'ai_investigator.py'), '--finding', identifier],
+            cwd=root, env=env, timeout=230)
+    else:
+        fail('Invalid or missing command parameters')
+
+
+if __name__ == '__main__':
+    main()
