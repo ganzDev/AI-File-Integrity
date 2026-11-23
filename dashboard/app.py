@@ -27,6 +27,19 @@ app.config.update(JSON_SORT_KEYS=False, MAX_CONTENT_LENGTH=20_000)
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 _ai_lock = threading.Lock()
+_sim_lock = threading.Lock()
+_sim_jobs: dict[str, dict] = {}
+
+SIM_SCENARIOS = {
+    'unauthorized_access': ('Unauthorized access', 'Attempt to list another department’s restricted directory.'),
+    'unauthorized_modification': ('Unauthorized modification', 'Attempt to write to a protected HR test file.'),
+    'deletion': ('Rapid deletion', 'Create and remove five disposable test files.'),
+    'permission_change': ('Permission change', 'Change test file permissions from 644 to 666.'),
+    'compromised_account': ('Compromised account', 'Create Finance test files then attempt restricted access.'),
+    'rapid_modification': ('Rapid modification', 'Modify five disposable files in quick succession.'),
+    'process_interaction': ('Process interaction', 'Use one Python process to write multiple test files.'),
+}
+
 
 CASES = [
     ('Attack', 'Unauthorized access', 2262, 'simulated_attack'),
@@ -374,6 +387,67 @@ def job_status(job_id):
     with _jobs_lock:
         job = _jobs.get(job_id)
         if not job: abort(404)
+        return jsonify(job=dict(job))
+
+
+@app.get('/api/simulations')
+def simulation_catalog():
+    with _sim_lock:
+        jobs = sorted((dict(j) for j in _sim_jobs.values()),
+                      key=lambda x: x['created_at'], reverse=True)[:12]
+    return jsonify(scenarios=[{'id': key, 'label': val[0], 'description': val[1]}
+                              for key, val in SIM_SCENARIOS.items()],
+                   services=service_states(), jobs=jobs)
+
+
+def _execute_simulation(job_id, scenario):
+    with _sim_lock:
+        _sim_jobs[job_id]['status'] = 'running'
+    try:
+        result = command('simulate', scenario, timeout=110)
+        with _sim_lock:
+            _sim_jobs[job_id].update(
+                status='complete' if result['ok'] else 'failed',
+                result=result['message'], returncode=result['returncode'])
+    except subprocess.TimeoutExpired:
+        with _sim_lock:
+            _sim_jobs[job_id].update(status='failed', result='Simulation timed out')
+    except OSError as exc:
+        with _sim_lock:
+            _sim_jobs[job_id].update(status='failed', result=f'Simulation unavailable: {type(exc).__name__}')
+    finally:
+        with _sim_lock:
+            _sim_jobs[job_id]['ended_at'] = datetime.now(timezone.utc).isoformat()
+
+
+@app.post('/api/simulations/<scenario>')
+def start_simulation(scenario):
+    if scenario not in SIM_SCENARIOS:
+        abort(404)
+    states = service_states()
+    if any(states.get(name) != 'active' for name in ('monitor', 'detector', 'auditd')):
+        return jsonify(error='Start monitor, detector, and auditd before running a demonstration.'), 409
+    with _sim_lock:
+        if any(job['status'] in ('queued', 'running') for job in _sim_jobs.values()):
+            return jsonify(error='A simulation is already running.'), 409
+        jid = secrets.token_urlsafe(12)
+        _sim_jobs[jid] = {'id': jid, 'scenario': scenario, 'status': 'queued',
+                          'created_at': datetime.now(timezone.utc).isoformat(), 'result': ''}
+        if len(_sim_jobs) > 40:
+            for key in list(_sim_jobs)[:-25]:
+                if _sim_jobs[key]['status'] not in ('queued', 'running'):
+                    _sim_jobs.pop(key, None)
+        reply = dict(_sim_jobs[jid])
+    threading.Thread(target=_execute_simulation, args=(jid, scenario), daemon=True).start()
+    return jsonify(job=reply), 202
+
+
+@app.get('/api/simulations/jobs/<job_id>')
+def simulation_job(job_id):
+    with _sim_lock:
+        job = _sim_jobs.get(job_id)
+        if job is None:
+            abort(404)
         return jsonify(job=dict(job))
 
 

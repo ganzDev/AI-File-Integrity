@@ -2,7 +2,7 @@
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const state = {view:'overview',page:1,limit:40,total:0,selectedFinding:null,jobId:null};
-const labels = {overview:'Overview',findings:'Security Findings',investigations:'AI Investigations',evaluation:'Model Evaluation',events:'Event Stream',logs:'System Logs'};
+const labels = {overview:'Overview',findings:'Security Findings',investigations:'AI Investigations',evaluation:'Model Evaluation',simulations:'Attack Simulations',events:'Event Stream',logs:'System Logs'};
 const escapeHtml = x => String(x ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = n => Number(n||0).toLocaleString('en-US');
 const pill = t => t ? `<span class="pill ${escapeHtml(t)}">${escapeHtml(t)}</span>` : '<span class="muted">—</span>';
@@ -30,6 +30,7 @@ function navigate(view){
   if(view==='findings')loadFindings();
   if(view==='investigations')loadInvestigations();
   if(view==='evaluation')loadEvaluation();
+  if(view==='simulations')loadSimulations();
   if(view==='events')loadEvents();
   if(view==='overview')loadOverview();
 }
@@ -79,6 +80,41 @@ async function loadEvaluation(){
     const segments=['SUSPICIOUS','BENIGN','INCONCLUSIVE'].map(name=>`<div class="${name}" style="width:${runs?100*(counts[name]||0)/runs:0}%" title="${name}: ${counts[name]||0}"></div>`).join('');
     return `<div class="eval-row"><div class="eval-name">${escapeHtml(x.name)}<span class="eval-category">${escapeHtml(x.category)} · Finding #${x.finding_id}</span></div><div class="stacked-bar">${segments}</div><div class="eval-metric">${runs} runs · ${x.agreement===null?'—':x.agreement+'%'} agree</div></div>`;
   }).join('');}catch(e){safeError(e);}
+}
+let activeSimulationJob=null;
+async function loadSimulations(){
+  try{
+    const data=await api('/api/simulations');
+    const ready=['monitor','detector','auditd'].every(k=>data.services[k]==='active');
+    const busy=data.jobs.some(j=>j.status==='running'||j.status==='queued');
+    $('#simulationCards').innerHTML=data.scenarios.map(s=>`<div class="sim-card"><div class="eyebrow">SIMULATED SCENARIO</div><h3>${escapeHtml(s.label)}</h3><p>${escapeHtml(s.description)}</p><button class="btn btn-primary sim-run" data-scenario="${escapeHtml(s.id)}" ${(!ready||busy)?'disabled':''}>Run scenario</button></div>`).join('');
+    $('#simHistory').innerHTML=data.jobs.length?data.jobs.map(j=>`<div class="sim-record"><header><strong>${escapeHtml(j.scenario.replaceAll('_',' '))}</strong>${pill(j.status.toUpperCase())}</header><div class="sim-hint">${escapeHtml(since(j.created_at))}</div>${j.result?`<pre class="terminal">${escapeHtml(j.result)}</pre>`:''}</div>`).join(''):'<span class="muted">No simulations started in this session.</span>';
+    if(!ready){$('#simHistory').insertAdjacentHTML('afterbegin','<p class="sim-hint">Monitoring services must all be active before simulation buttons become available.</p>');}
+  }catch(e){safeError(e);}
+}
+async function launchSimulation(name){
+  try{
+    const d=await api(`/api/simulations/${encodeURIComponent(name)}`,{method:'POST',body:{}});
+    activeSimulationJob=d.job.id;
+    flash(`Simulation ${name} launched`);
+    await loadSimulations();
+    pollSimulation(d.job.id);
+  }catch(e){safeError(e);}
+}
+async function pollSimulation(id){
+  for(let i=0;i<70;i++){
+    await new Promise(resolve=>setTimeout(resolve,1500));
+    if(activeSimulationJob!==id)return;
+    try{
+      const d=await api(`/api/simulations/jobs/${encodeURIComponent(id)}`);
+      if(state.view==='simulations')await loadSimulations();
+      if(d.job.status==='complete'||d.job.status==='failed'){
+        activeSimulationJob=null;
+        flash(d.job.status==='complete'?'Simulation finished. Inspect the newest findings after detector polling.':`Simulation failed: ${d.job.result||'unknown error'}`,d.job.status==='failed');
+        return;
+      }
+    }catch(e){activeSimulationJob=null;safeError(e);return;}
+  }
 }
 function openDrawer(title,eyebrow,content){$('#drawerTitle').textContent=title;$('#drawerEyebrow').textContent=eyebrow;$('#drawerContent').innerHTML=content;$('#overlay').hidden=false;}
 function closeDrawer(){$('#overlay').hidden=true;state.selectedFinding=null;state.jobId=null;}
@@ -147,7 +183,7 @@ async function serviceAction(service,action){
   catch(e){safeError(e);}finally{loadOverview();}
 }
 async function loadLogs(){try{const d=await api(`/api/logs/${$('#logService').value}`);$('#logOutput').textContent=d.message||'No journal entries found.';}catch(e){$('#logOutput').textContent=e.message;safeError(e);}}
-function refreshActive(){const views={overview:loadOverview,findings:loadFindings,investigations:loadInvestigations,evaluation:loadEvaluation,events:loadEvents,logs:loadLogs};views[state.view]();}
+function refreshActive(){const views={overview:loadOverview,findings:loadFindings,investigations:loadInvestigations,evaluation:loadEvaluation,simulations:loadSimulations,events:loadEvents,logs:loadLogs};views[state.view]();}
 $$('.navitem').forEach(el=>el.addEventListener('click',()=>navigate(el.dataset.view)));
 $$('[data-go]').forEach(el=>el.addEventListener('click',()=>navigate(el.dataset.go)));
 $('#refreshBtn').onclick=refreshActive;$('#serviceRefresh').onclick=loadOverview;
@@ -158,6 +194,9 @@ $('#findSearch').addEventListener('input',()=>{clearTimeout(searchTimer);searchT
 $('#prevPage').onclick=()=>{if(state.page>1){state.page--;loadFindings();}};
 $('#nextPage').onclick=()=>{if(state.page*state.limit<state.total){state.page++;loadFindings();}};
 $('#loadLogs').onclick=loadLogs;
+$('#simRefresh').onclick=loadSimulations;
+$('#simFindings').onclick=()=>navigate('findings');
+$('#simEvents').onclick=()=>navigate('events');
 $('#drawerClose').onclick=closeDrawer;
 $('#overlay').addEventListener('click',e=>{if(e.target===$('#overlay'))closeDrawer();});
 $('#cancelAction').onclick=closeConfirm;
@@ -165,6 +204,8 @@ $('#confirmOverlay').addEventListener('click',e=>{if(e.target===$('#confirmOverl
 $('#confirmAction').onclick=()=>{const callback=confirmCallback;closeConfirm();if(callback)callback();};
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeConfirm();closeDrawer();}});
 document.addEventListener('click',e=>{
+  const sim=e.target.closest('[data-scenario]');
+  if(sim){const name=sim.dataset.scenario;const label=name.replaceAll('_',' ');confirmDialog('Run controlled simulation',`Run ${label}? This creates test filesystem activity under /opt/organization and adds evidence to your existing logs and database.`,()=>launchSimulation(name));return;}
   const a=e.target.closest('[data-assessment]');if(a){openAssessment(+a.dataset.assessment);return;}
   const f=e.target.closest('[data-finding]');if(f){openFinding(+f.dataset.finding);}
 });
@@ -172,3 +213,5 @@ document.addEventListener('keydown',e=>{if(e.key==='Enter'){const row=e.target.c
 loadOverview();
 setInterval(()=>{if(document.visibilityState==='visible'&&state.view==='overview')loadOverview();},5000);
 setInterval(()=>{if(document.visibilityState==='visible'&&state.view==='findings')loadFindings();},10000);
+
+setInterval(()=>{if(document.visibilityState==='visible'&&state.view==='simulations')loadSimulations();},5000);

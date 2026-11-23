@@ -103,6 +103,24 @@ def main():
         if result.rowcount != 1:
             fail('Finding not found')
         print(f'Finding {identifier} status set to {status}')
+    elif cmd == 'simulate' and len(sys.argv) == 3:
+        # Only the seven fixed test scenarios. No command, path, or arbitrary argument input.
+        scenarios = {
+            'unauthorized_access', 'unauthorized_modification', 'deletion',
+            'permission_change', 'compromised_account', 'rapid_modification',
+            'process_interaction',
+        }
+        scenario = sys.argv[2]
+        if scenario not in scenarios:
+            fail('Invalid simulation scenario')
+        if any(subprocess.run(['/usr/bin/systemctl', 'is-active', unit],
+                              capture_output=True, text=True, timeout=4).stdout.strip() != 'active'
+               for unit in (UNITS['monitor'], UNITS['detector'], UNITS['auditd'])):
+            fail('Monitor, detector, and auditd must all be active')
+        # Simulator creates disposable test files under /opt/organization/finance/d3_tests.
+        run([str(root / '.venv' / 'bin' / 'python'), '-u',
+             str(root / 'src' / 'attack_simulator.py'), '--scenario', scenario],
+            cwd=root, timeout=100)
     elif cmd == 'investigate' and len(sys.argv) == 3:
         identifier = sys.argv[2]
         if not identifier.isascii() or not identifier.isdecimal() or len(identifier)>12 or int(identifier)<1:
