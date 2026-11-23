@@ -112,9 +112,12 @@ async function openAssessment(aid){
     const fields=[['Finding',`#${a.finding_id}`],['Classification',a.classification],['Severity',a.severity],['Confidence',a.confidence],['Model',a.model],['Validation',a.validation_status||'NO_VALIDATION'],['Verified claims',`${a.verified_claims??'—'} / ${a.total_claims??'—'}`],['Incident coverage',coverage.status?`${coverage.status} (${coverage.covered??0}/${coverage.total??0})`:'N/A']];
     let html='<div class="detail-grid">'+fields.map(([k,val])=>`<div><small>${escapeHtml(k)}</small><strong>${escapeHtml(val)}</strong></div>`).join('')+'</div>';
     html+=`<h3 class="section-title">AI reasoning</h3><div class="analysis-box">${escapeHtml(typeof analysis==='string'?analysis:JSON.stringify(analysis,null,2)||'No analysis field')}</div>`;
-    html+='<h3 class="section-title">Structured AI output</h3><details><summary>View assessment JSON</summary><pre class="terminal">'+escapeHtml(JSON.stringify(s,null,2))+'</pre></details>';
+    const recommendations=Array.isArray(s.recommendations)?s.recommendations:[];
+    html+='<h3 class="section-title">Recommended actions</h3>'+(recommendations.length?'<div class="detail-rows">'+recommendations.map((r,i)=>'<div class="assessment-card"><strong>'+escapeHtml(`${i+1}. ${r}`)+'</strong></div>').join('')+'</div>':'<p class="muted">No recommendations provided.</p>');
+    const reportAssessment={...s}; delete reportAssessment.authorization_status;
+    html+='<h3 class="section-title">Structured AI output</h3><details><summary>View assessment JSON</summary><pre class="terminal">'+escapeHtml(JSON.stringify(reportAssessment,null,2))+'</pre></details>';
     html+='<h3 class="section-title">Independent evidence validation</h3><details><summary>View validation JSON</summary><pre class="terminal">'+escapeHtml(JSON.stringify(v,null,2))+'</pre></details>';
-    html+=`<p class="footnote">VERIFIED_FIELDS only checks specified structured claims. It does not establish correct classification, verified authorization, or complete coverage.</p><div class="action-strip"><button id="openParent" class="btn btn-quiet">← Open finding #${a.finding_id}</button></div>`;
+    html+=`<p class="footnote">VERIFIED_FIELDS only checks specified structured claims. It does not establish correct classification, organizational approval, or complete coverage.</p><div class="action-strip"><button id="openParent" class="btn btn-quiet">← Open finding #${a.finding_id}</button></div>`;
     openDrawer(`Assessment #${aid}`,'AI INVESTIGATION',html);$('#openParent').onclick=()=>openFinding(a.finding_id);
   }catch(e){safeError(e);}
 }
